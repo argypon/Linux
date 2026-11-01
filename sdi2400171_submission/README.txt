@@ -3,10 +3,10 @@ K22 Programming Assignment 1
 Q1.
 A program with a high nivcsw count is heavily CPU-bound, performing continuous calculations without pausing. Because it rarely waits for external resources like disk or network, it consumes its entire allocated time slice, forcing the operating system's scheduler to preempt it and forcibly take the CPU away to let other processes run.
 
-Q2. ✅ 
+Q2. 
 A program with a high nvcsw (voluntary context switch) count is a heavily I/O-bound or interactive program, that frequently pauses to wait for external events like network traffic, file access, or user input. Instead of using its full time slice, the program voluntarily "sends" the CPU back to the operating system every time it stops to wait for these resources to become available.
 
-Q3. ✅ 
+Q3. 
 Many processes have a start time that matches the system boot time. These are not programs a user launched, they are kernel threads and system daemons launched automatically by the operating system. Kernel threads run purely in kernel space, while daemons are ordinary user-space programs that run on the system’s behalf. On the other hand, user programs show later, have scattered start times that match when the user started them after logging in.
 
 Q4.
@@ -42,6 +42,3 @@ Readability: ~8/10. The implementation is organized into small traversal and
 record-filling helpers, and the userspace output is straightforward. Although 
 comments could be mmore descriptive and formatting could be made more consistent 
 with the kernel style.
-
-Indicative total: 79/100, subject to the assignment's detailed syscall
-specification and instructor evaluation.
