@@ -21,21 +21,27 @@ schedule return address in the reported state. The sample alone cannot prove
 why cupsd disappeared, but process lifetime and scheduling state make this
 kind of difference possible.
 
-Submission assessment:
-Part 1 (90%): the patch implements the syscall, UAPI structure, process-tree
-traversal, and syscall-number registration for x86-64 and the generic syscall
-table used by ARM64. Part 2 (10%): the userspace program retries with larger
-buffers, prints the returned process tree with indentation, and reports errors.
-The userspace program builds with the supplied Makefile. Runtime validation of
-the syscall still requires booting a kernel built with the patch, so this
-assessment is based on implementation and build checks rather than a live
-syscall run.
 
-Build the userspace program:
-  make -C userspace
+Grading assessment:
+The submited patch does compile, passes all checkpatch linting ests without errors 
+or warnings and the patched kernel does boot.
 
-If the header was installed into a kernel source tree's usr/include directory:
-  make -C userspace KERNEL_HEADERS=/path/to/linux-7.2/usr/include
+Correctness: ~50/60. The patch registers the syscall for x86-64 and ARM64,
+defines the UAPI structure, and walks the task tree in depth-first order while
+holding tasklist_lock. It handles invalid pointers, invalid capacities,
+allocation failures, and copy-to-user errors. Runtime behavior should still be
+tested with representative process trees and user/kernel tasks.
 
-Run on the patched kernel:
-  ./userspace/k22test
+Robustness: ~20/30. The kernel uses a temporary buffer and reports insufficient
+capacity, while the userspace program retries and checks errors. One area to
+review is the x86 kernel-PC helper: checking task_curr() and reading
+t->thread.sp do not by themselves guarantee that the task's saved stack stays
+valid if it is scheduled concurrently.
+
+Readability: ~8/10. The implementation is organized into small traversal and
+record-filling helpers, and the userspace output is straightforward. Although 
+comments could be mmore descriptive and formatting could be made more consistent 
+with the kernel style.
+
+Indicative total: 79/100, subject to the assignment's detailed syscall
+specification and instructor evaluation.

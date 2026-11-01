@@ -1,109 +1,89 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * k22tree: copy the process tree to user space in DFS order.
+ *Implementation of k22tree: copy the process tree to user space in DFS order
  */
-
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
+#include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/stat.h>
 #include <linux/sched/task.h>
 #include <linux/sched/task_stack.h>
 #include <linux/ptrace.h>
-#include <asm/switch_to.h>
 #include <linux/k22info.h>
+#include <linux/k22tree.h>
 
-/* Filter out threads and zombies; only active main processes are returned. */
-static bool is_proc(struct task_struct *t)
+/*Return the kernel instruction pointer for a task(x86 and arm64 override it) */
+unsigned long __weak arch_k22_kernelpc(struct task_struct *t)
 {
-	return thread_group_leader(t) && !t->exit_state;
+	return 0;
 }
 
-/*
- * A child is stored in the children list of the thread that forked it.
- * Search all threads in the process to find its children.
- */
-static struct task_struct *first_child(struct task_struct *p)
+/*Check if a task should be included in the tree*/
+static bool match(struct task_struct *t, bool alive_only)
+{
+	return thread_group_leader(t) && (!alive_only || !t->exit_state);
+}
+
+static struct task_struct *next_child(struct task_struct *p,
+				      struct task_struct *prev, bool alive_only)
 {
 	struct task_struct *th, *c;
+	bool seen = !prev;
 
-	for_each_thread(p, th)
-		list_for_each_entry(c, &th->children, sibling)
-			if (is_proc(c))
+	for_each_thread(p, th) {
+		list_for_each_entry(c, &th->children, sibling) {
+			if (!seen) {
+				seen = (c == prev);
+				continue;
+			}
+			if (match(c, alive_only))
 				return c;
-	return NULL;
-}
-
-/*
- * A process's children may be attached to different threads in its thread
- * group. Walk the remaining entries in this thread's list, then the child
- * lists of the other threads in the group.
- */
-static struct task_struct *next_sibling(struct task_struct *t)
-{
-	struct task_struct *parent = t->real_parent;
-	struct task_struct *th;
-	struct task_struct *s;
-
-	if (t == &init_task)
-		return NULL;
-
-	for (s = list_next_entry(t, sibling); &s->sibling != &parent->children;
-	     s = list_next_entry(s, sibling))
-		if (is_proc(s))
-			return s;
-
-	th = next_thread(parent);
-	while (th != parent) {
-		list_for_each_entry(s, &th->children, sibling)
-			if (is_proc(s))
-				return s;
-		th = next_thread(th);
+		}
 	}
-
 	return NULL;
 }
 
-/* Return the saved kernel instruction pointer of a task. */
-static unsigned long kernel_pc(struct task_struct *t)
+static struct task_struct *first_child(struct task_struct *p, bool alive_only)
 {
-	if (task_curr(t) || !t->thread.sp)
-		return 0;
-#ifdef CONFIG_X86_64
-	return ((struct inactive_task_frame *)t->thread.sp)->ret_addr;
-#elif defined(CONFIG_ARM64)
-	return t->thread.cpu_context.pc;
-#else
-	return 0;
-#endif
+	return next_child(p, NULL, alive_only);
 }
 
-/* Fill a k22info structure with information about a process. */
-static void fill(struct k22info *i, struct task_struct *t,
-		 struct task_struct *child, struct task_struct *sib)
+static struct task_struct *next_sibling(struct task_struct *t, bool alive_only)
 {
-	memset(i, 0, sizeof(*i));
+	if (t == &init_task)	
+		return NULL;
+	return next_child(t->real_parent, t, alive_only);
+}
 
+static void fill(struct k22info *i, struct task_struct *t)
+{
+	struct task_struct *c = first_child(t, true);
+	struct task_struct *s = next_sibling(t, true);
+
+	memset(i, 0, sizeof(*i));
 	get_task_comm(i->comm, t);
 	i->pid = task_pid_nr(t);
 	i->parent_pid = (t == &init_task) ? 0 : task_tgid_nr(t->real_parent);
-	i->first_child_pid = child ? task_pid_nr(child) : 0;
-	i->next_sibling_pid = sib ? task_pid_nr(sib) : 0;
+	i->first_child_pid = c ? task_pid_nr(c) : 0;
+	i->next_sibling_pid = s ? task_pid_nr(s) : 0;
 	i->nvcsw = t->nvcsw;
 	i->nivcsw = t->nivcsw;
 	i->start_time = t->start_time;
 
+	if (t->exit_state)
+		return;
+
 	if (!(t->flags & (PF_KTHREAD | PF_IO_WORKER)))
 		i->userpc = instruction_pointer(task_pt_regs(t));
-
-	i->kernelpc = kernel_pc(t);
+	i->kernelpc = arch_k22_kernelpc(t);
 }
 
 SYSCALL_DEFINE2(k22tree, struct k22info __user *, buf, int __user *, ne)
 {
-	struct task_struct *p, *child, *sib, *next;
+	struct task_struct *p, *next;
 	struct k22info *kbuf;
 	int max, n = 0, ret = 0;
 
@@ -114,9 +94,11 @@ SYSCALL_DEFINE2(k22tree, struct k22info __user *, buf, int __user *, ne)
 	if (max <= 0)
 		return -EINVAL;
 
+	/* Don't allocate (much) more than the number of tasks that exist. */
 	if (max > nr_threads + 32)
 		max = nr_threads + 32;
 
+	/* Allocate a temporary kernel buffer for the entries */
 	kbuf = kvmalloc_array(max, sizeof(*kbuf), GFP_KERNEL | __GFP_NOWARN);
 	if (!kbuf)
 		return -ENOMEM;
@@ -128,25 +110,26 @@ SYSCALL_DEFINE2(k22tree, struct k22info __user *, buf, int __user *, ne)
 			ret = -ENOSPC;
 			break;
 		}
+		fill(&kbuf[n++], p);
 
-		child = first_child(p);
-		sib = next_sibling(p);
-		fill(&kbuf[n++], p, child, sib);
-
-		/* Descend, take a sibling, or ascend until a sibling is found. */
-		next = child ? child : sib;
+		/* DFS: first child, else next sibling, else climb up */
+		next = first_child(p, false);
 		while (!next && p != &init_task) {
-			p = p->real_parent->group_leader;
-			next = next_sibling(p);
+			next = next_sibling(p, false);
+			if (!next)
+				p = p->real_parent->group_leader;
 		}
 		p = next;
 	}
 	read_unlock(&tasklist_lock);
 
+	/* Copy the entries to the caller's buffer*/
 	if (copy_to_user(buf, kbuf, n * sizeof(*kbuf)))
 		ret = -EFAULT;
 	else if (!ret && put_user(n, ne))
 		ret = -EFAULT;
+
+	/* Free the temporary buffer*/
 	kvfree(kbuf);
 	return ret;
 }
